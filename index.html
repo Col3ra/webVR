@@ -1,0 +1,85 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Visor MR de Biomodelos</title>
+<style>body{margin:0; font-family:system-ui} #ui{position:fixed;top:10px;left:10px;background:#0008;color:#fff;padding:8px;border-radius:8px}</style>
+<div id="ui">
+  <label>URL del GLB: <input id="url" size="36" value="https://github.com/Col3ra/webVR/modelo/modelo1.glb"></label>
+  <button id="place">Colocar/Ajustar</button>
+  <button id="reset">Reset</button>
+  <div>Stick izq: rotar · Stick der: escalar</div>
+</div>
+<script type="module">
+import * as THREE from 'https://unpkg.com/three@0.161.0/build/three.module.js';
+import {GLTFLoader} from 'https://unpkg.com/three@0.161.0/examples/jsm/loaders/GLTFLoader.js';
+
+let scene=new THREE.Scene(), camera=new THREE.PerspectiveCamera(), renderer=new THREE.WebGLRenderer({alpha:true, antialias:true});
+renderer.xr.enabled=true; renderer.setSize(innerWidth, innerHeight); document.body.appendChild(renderer.domElement);
+
+let model=null, reticle=null, hitSource=null, xrRefSpace=null, anchor=null;
+const loader=new GLTFLoader(); const clock=new THREE.Clock();
+scene.add(new THREE.HemisphereLight(0xffffff,0x444444,1.0));
+
+async function loadModel(url){
+  if(model){ scene.remove(model); model.traverse(o=>{ if(o.geometry) o.geometry.dispose(); if(o.material) o.material.dispose(); }); model=null; }
+  const glb=await loader.loadAsync(url);
+  model=glb.scene; model.traverse(o=>{ if(o.isMesh){ o.castShadow=false; o.receiveShadow=false; }});
+  model.visible=false; scene.add(model);
+}
+
+function makeReticle(){
+  const geo=new THREE.RingGeometry(0.06,0.07,32).rotateX(-Math.PI/2);
+  const mat=new THREE.MeshBasicMaterial({color:0x00ff88}); reticle=new THREE.Mesh(geo,mat);
+  reticle.matrixAutoUpdate=false; reticle.visible=false; scene.add(reticle);
+}
+
+async function startAR(){
+  const session = await navigator.xr.requestSession('immersive-ar',{
+    requiredFeatures:['hit-test','anchors','local-floor'],
+    optionalFeatures:['dom-overlay'], domOverlay:{root:document.body}
+  });
+  renderer.xr.setReferenceSpaceType('local-floor');
+  await renderer.xr.setSession(session);
+  xrRefSpace = await session.requestReferenceSpace('local-floor');
+  const viewerSpace = await session.requestReferenceSpace('viewer');
+  hitSource = await session.requestHitTestSource({space: viewerSpace});
+  makeReticle();
+
+  session.addEventListener('select', async (ev)=>{
+    if(!reticle?.visible || !model) return;
+    const pose = ev.frame.getPose(reticle.anchorSpace ?? reticle.matrix, xrRefSpace);
+    if(anchor) anchor.delete();
+    anchor = await ev.frame.createAnchor({x:0,y:0,z:0,w:1, position: pose.transform.position}, xrRefSpace);
+    anchor.anchorSpace && (model.anchorSpace = anchor.anchorSpace);
+    model.visible=true;
+  });
+}
+
+function onXRFrame(t, frame){
+  const session = renderer.xr.getSession(); const ref = xrRefSpace; if(!ref) return;
+  const pose = frame.getViewerPose(ref);
+  if(hitSource && frame){
+    const hits = frame.getHitTestResults(hitSource);
+    if(hits.length){
+      const hit = hits[0]; const hitPose = hit.getPose(ref);
+      reticle.visible=true; reticle.position.set(hitPose.transform.position.x, hitPose.transform.position.y, hitPose.transform.position.z);
+      reticle.updateMatrixWorld(true);
+    } else { reticle.visible=false; }
+  }
+  // Gamepad sticks: rotación/escala rápida
+  const inputSources = session.inputSources;
+  for(const src of inputSources){
+    const gp=src.gamepad; if(!gp || !model || !model.visible) continue;
+    const [sx,sy]=gp.axes;
+    model.rotation.y -= sx*0.02;
+    const s=1+sy*0.01; model.scale.multiplyScalar(Math.max(0.01, s));
+  }
+  renderer.render(scene, camera);
+}
+
+document.getElementById('place').onclick=()=>{ reticle && (reticle.visible=true); if(model) model.visible=false; };
+document.getElementById('reset').onclick=()=>{ if(anchor){anchor.delete(); anchor=null;} if(model){model.visible=false; model.position.set(0,0,0); model.scale.set(1,1,1);} };
+document.getElementById('url').onchange=(e)=>loadModel(e.target.value);
+
+loadModel(document.getElementById('url').value);
+startAR(); renderer.setAnimationLoop(onXRFrame);
+</script>
